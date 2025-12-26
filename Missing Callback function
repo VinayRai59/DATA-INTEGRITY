@@ -1,0 +1,125 @@
+#include <ixwebsocket/IXWebSocket.h>
+#include <iostream>
+#include <unistd.h>
+#include <string>
+#include <unordered_map>
+#include <nlohmann/json.hpp>
+#include <functional>
+
+using namespace std;
+using json=nlohmann::json;
+
+
+struct symbol_state{
+    bool has_last=false;
+    long long last_trade_id=-1;
+};
+unordered_map<string, symbol_state> symbol_state_map;
+
+using TickLossCallback=function<void(const string&,long long,long long)>;
+
+TickLossCallback on_tick_loss;
+
+int main(){
+
+    on_tick_loss=
+    [](const string& symbol,long long missing,long long trade_id)
+    {
+        cout<<" CAllback "<<symbol
+            <<" | Tick_loss | Missing : "<<missing
+            <<" | Trade_Id : "<<trade_id
+            <<endl;
+    };
+
+    ix::WebSocket ws;
+
+    ws.setUrl("wss://stream.binance.com:9443/ws");
+
+    ws.setOnMessageCallback(
+        [&](const ix::WebSocketMessagePtr& msg)
+        {
+            if(msg->type==ix::WebSocketMessageType::Open)
+            {
+                cout<<"Websocket Connected Successfully"<<endl;
+
+                string sub=R"({
+                "method" : "SUBSCRIBE",
+                "params" : ["btcusdt@trade","ethusdt@trade"],
+                "id" : 1
+                })";
+
+                ws.send(sub);
+            }
+
+            else if(msg->type==ix::WebSocketMessageType::Message)
+            {
+                try
+                {
+                    json j=json::parse(msg->str);
+
+                    if(j.contains("result") && j.contains("id"))
+                    {
+                        return;
+                    }
+
+                    if(j.contains("e") && j["e"]=="trade")
+                    {
+                        string symbol=j["s"].get<string>();
+                        long long trade_id=j["t"].get<long long>();
+
+                        auto& state=symbol_state_map[symbol];
+
+                        if(!state.has_last)
+                        {
+                            state.has_last=true;
+                            state.last_trade_id=trade_id;
+                        }
+
+                        else if(trade_id==state.last_trade_id)
+                        {
+                            cout<<symbol<<" : Duplicate trade Id"<<endl;
+                        }
+
+                        else if(trade_id<state.last_trade_id)
+                        {
+                            cout<<symbol<<" : Out of order Tick"<<endl;
+                        }
+
+                        else if(trade_id>state.last_trade_id+1)
+                        {
+                            long long missing=trade_id-state.last_trade_id-1;
+                            if(on_tick_loss)
+                            {
+                                on_tick_loss(symbol,missing,trade_id);
+                            }
+                            state.last_trade_id=trade_id;
+                        }
+
+                        else if(trade_id==state.last_trade_id+1)
+                        {
+                            cout<<symbol<<" : Normal Tick : "<<trade_id<<endl;
+                            state.last_trade_id=trade_id;
+                        }
+                    }
+                }
+                catch(exception& e)
+                {
+                    cout<<"Erro : "<<e.what()<<endl;
+                }
+                
+            }
+
+        }
+    );
+
+    ws.start();
+
+    while(true)
+    {
+        usleep(500);
+    }
+
+    ws.stop();
+
+    return 0;
+}
