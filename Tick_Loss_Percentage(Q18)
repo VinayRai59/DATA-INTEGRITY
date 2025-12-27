@@ -1,0 +1,102 @@
+#include <ixwebsocket/IXWebSocket.h>
+#include <iostream>
+#include <unistd.h>
+#include <string>
+#include <nlohmann/json.hpp>
+
+using namespace std;
+using json=nlohmann::json;
+
+int main(){
+    ix::WebSocket ws;
+    bool has_last=false;
+    long long last_id=-1;
+
+    long long total_get_ticks=0;
+    long long total_loss_ticks=0;
+
+    ws.setUrl("wss://stream.binance.com:9443/ws/btcusdt@trade");
+
+    ws.setOnMessageCallback(
+        [&](const ix::WebSocketMessagePtr& msg)
+        {
+            if(msg->type==ix::WebSocketMessageType::Open)
+            {
+                cout<<"Websocket Connected Successfully"<<endl;
+                has_last=false;
+                last_id=-1;
+                total_get_ticks=0;
+                total_loss_ticks=0;
+            }
+
+            else if(msg->type==ix::WebSocketMessageType::Message)
+            {
+                try
+                {
+                    json j=json::parse(msg->str);
+
+                    if(j.contains("result") && j.contains("id"))
+                    {
+                        return;
+                    }
+
+                    else if(j.contains("e") && j["e"]=="trade")
+                    {
+                        total_get_ticks++;
+                        long long trade_id=j["t"].get<long long>();
+                        long long override=last_id+1;
+                        long long normal_tick=last_id+1;
+
+                        if(!has_last)
+                        {
+                            has_last=true;
+                            last_id=trade_id;
+                        }
+
+                        else if(last_id==trade_id)
+                        {
+                            cout<<"Duplicate Trade Id"<<endl;
+                        }
+
+                        else if(trade_id>override)
+                        {
+                            long long missing=trade_id-last_id-1;
+                            total_loss_ticks +=missing;
+
+                            long long expected=total_get_ticks+total_loss_ticks;
+                            double loss_pct=((double)total_loss_ticks/(double)expected)*100;
+
+                            cout<<"Trade Ids missing : "<<missing<<" | Loss% : "<<loss_pct <<endl;                        
+                            last_id=trade_id;
+                        }
+
+                        else if(trade_id==normal_tick)
+                        {
+                            long long expected=total_get_ticks+total_loss_ticks;
+                            double loss_pct=((double)total_loss_ticks/(double)expected)*100;
+                            cout<<"Normal TICK : "<<trade_id<<" | Loss% : "<<loss_pct<<endl;
+                            last_id=trade_id;
+                        }
+                    }
+                }
+                catch(exception& e)
+                {
+                    cout<<"Erro : "<<e.what()<<endl;
+                }
+                
+            }
+
+        }
+    );
+
+    ws.start();
+
+    while(true)
+    {
+        usleep(500);
+    }
+
+    ws.stop();
+
+    return 0;
+}
