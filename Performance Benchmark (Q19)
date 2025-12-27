@@ -1,0 +1,50 @@
+#include <iostream>
+#include <chrono>
+
+using namespace std;
+using namespace std::chrono;
+
+int main()
+{
+    const long long TOTAL_TICKS = 1'000'000;
+    long long last_id = -1;
+    long long loss_ticks = 0;
+
+    auto start = high_resolution_clock::now();
+
+    for(long long i = 1; i <= TOTAL_TICKS; i++)
+    {
+        long long trade_id = i;
+
+        if(i % 10000 == 0)
+            trade_id += 5;
+
+        if(last_id != -1 && trade_id > last_id + 1)
+        {
+            long long missing = trade_id - last_id - 1;
+            loss_ticks += missing;
+        }
+
+        last_id = trade_id;
+    }
+
+    auto end = high_resolution_clock::now();
+
+    auto duration_ns =
+        duration_cast<nanoseconds>(end - start).count();
+
+    double avg_latency_ns =
+        (double)duration_ns / TOTAL_TICKS;
+
+    double tps =
+        (double)TOTAL_TICKS /
+        (duration_ns / 1e9);
+
+    cout << "Total ticks processed : " << TOTAL_TICKS << endl;
+    cout << "Total lost ticks      : " << loss_ticks << endl;
+    cout << "Total time (ns)       : " << duration_ns << endl;
+    cout << "Avg latency (ns)      : " << avg_latency_ns << endl;
+    cout << "Throughput (TPS)      : " << tps << endl;
+
+    return 0;
+}
