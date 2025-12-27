@@ -1,0 +1,123 @@
+#include <ixwebsocket/IXWebSocket.h>
+#include <iostream>
+#include <unistd.h>
+#include <string>
+#include <nlohmann/json.hpp>
+#include <fstream>
+#include <mutex>
+
+using namespace std;
+using json=nlohmann::json;
+
+class Logger{
+    private:
+    ofstream file;
+    mutex mtx;
+
+    public:
+    Logger(const string& filename)
+    {
+        file.open(filename,ios::app);
+    }
+
+    ~Logger()
+    {
+        if(file.is_open())
+        file.close();
+    }
+
+    void log(const string& msg)
+    {
+        lock_guard<mutex> lock(mtx);
+
+        cout<<msg<<endl;
+
+        if(file.is_open())
+        {
+            file<<msg<<endl;
+            file.flush();
+        }
+    }
+};
+
+Logger logger("tick_loss.log");
+
+int main(){
+    ix::WebSocket ws;
+    bool has_last=false;
+    long long last_timestamp=-1;
+    long long max_gap_allowed=200; //ms
+
+    ws.setUrl("wss://stream.binance.com:9443/ws/btcusdt@trade");
+
+    ws.setOnMessageCallback(
+        [&](const ix::WebSocketMessagePtr& msg)
+        {
+            if(msg->type==ix::WebSocketMessageType::Open)
+            {
+                cout<<"Websocket Connected Successfully"<<endl;
+            }
+
+            else if(msg->type==ix::WebSocketMessageType::Message)
+            {
+                try
+                {
+                    json j=json::parse(msg->str);
+
+                    if(j.contains("result") && j.contains("id"))
+                    {
+                        return;
+                    }
+
+                    else if(j.contains("e") && j["e"]=="trade")
+                    {
+                        long long timestamp=j["T"].get<long long>();
+                        long long gap=timestamp-last_timestamp;
+
+                        if(!has_last)
+                        {
+                            has_last=true;
+                            last_timestamp=timestamp;
+                            logger.log("First Tick Received");
+                        }
+
+                        else if(gap<0)
+                        {
+                            logger.log("Out of order timestamp");
+                            return;
+                        }
+
+                        else if(gap>max_gap_allowed)
+                        {
+                            logger.log("[Data Loss] Timestamp gap"+to_string(gap)+" ms");
+                            last_timestamp=timestamp;
+                        }
+
+                        else if(gap<max_gap_allowed)
+                        {
+                            logger.log("[NORMAL] Timestamp OK gap = "+to_string(gap)+" ms");
+                            last_timestamp=timestamp;
+                        }
+                    }
+                }
+                catch(exception& e)
+                {
+                    cout<<"Erro : "<<e.what()<<endl;
+                }
+                
+            }
+
+        }
+    );
+
+    ws.start();
+
+    while(true)
+    {
+        usleep(500);
+    }
+
+    ws.stop();
+
+    return 0;
+}
