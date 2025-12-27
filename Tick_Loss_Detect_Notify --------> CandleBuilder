@@ -1,0 +1,117 @@
+#include <ixwebsocket/IXWebSocket.h>
+#include <iostream>
+#include <unistd.h>
+#include <string>
+#include <nlohmann/json.hpp>
+
+using namespace std;
+using json=nlohmann::json;
+
+void reset_all(bool& has_last,long long& last_timestamp,int& continous_loss_count)
+{
+    has_last=false;
+    last_timestamp=-1;
+    continous_loss_count=0;
+}
+
+class candlebuilder{
+    public:
+    void on_tick_loss(long long loss_timestamp)
+    {
+        cout<<"[CANDLE] Tick loss detected at "
+            <<loss_timestamp
+            <<" -> candle marked INCOMPLETE"
+            <<endl;
+
+        //future
+        //Mark candle as Dirty
+        //Pause candle close
+        //request REST backfill
+    }
+};
+
+int main(){
+    ix::WebSocket ws;
+
+    candlebuilder builder;
+
+    bool has_last=false;
+    long long last_timestamp=-1;
+    long long max_gap_allowed=200; //ms
+    int continuous_loss_count=0;
+
+    ws.setUrl("wss://stream.binance.com:9443/ws/btcusdt@trade");
+
+    ws.setOnMessageCallback(
+        [&](const ix::WebSocketMessagePtr& msg)
+        {
+            if(msg->type==ix::WebSocketMessageType::Open)
+            {
+                cout<<"Websocket Connected Successfully"<<endl;
+                reset_all(has_last,last_timestamp,continuous_loss_count);
+            }
+
+            else if(msg->type==ix::WebSocketMessageType::Message)
+            {
+                try
+                {
+                    json j=json::parse(msg->str);
+
+                    if(j.contains("result") && j.contains("id"))
+                    {
+                        return;
+                    }
+
+                    else if(j.contains("e") && j["e"]=="trade")
+                    {
+                        long long timestamp=j["T"].get<long long>();
+                        long long gap=timestamp-last_timestamp;
+
+                        if(!has_last)
+                        {
+                            has_last=true;
+                            last_timestamp=timestamp;
+                            continuous_loss_count=0;
+                        }
+
+                        else if(gap<0)
+                        {
+                            return;
+                        }
+
+                        else if(gap>max_gap_allowed)
+                        {
+                            continuous_loss_count++;
+                            builder.on_tick_loss(timestamp);
+                            last_timestamp=timestamp;
+                        }
+
+                        else if(gap<max_gap_allowed)
+                        {
+                            continuous_loss_count=0;
+                            cout<<"Normal Timestamp"<<endl;
+                            last_timestamp=timestamp;  
+                        }
+                    }
+                }
+                catch(exception& e)
+                {
+                    cout<<"Erro : "<<e.what()<<endl;
+                }
+                
+            }
+
+        }
+    );
+
+    ws.start();
+
+    while(true)
+    {
+        usleep(500);
+    }
+
+    ws.stop();
+
+    return 0;
+}
