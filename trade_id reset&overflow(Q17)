@@ -1,0 +1,102 @@
+#include <ixwebsocket/IXWebSocket.h>
+#include <iostream>
+#include <unistd.h>
+#include <string>
+#include <nlohmann/json.hpp>
+
+using namespace std;
+using json = nlohmann::json;
+
+int main(){
+    ix::WebSocket ws;
+
+    bool has_last = false;
+    long long last_id = -1;
+    const long long OVERFLOW_LIMIT = 300;
+
+    ws.setUrl("wss://stream.binance.com:9443/ws/btcusdt@trade");
+
+    ws.setOnMessageCallback(
+        [&](const ix::WebSocketMessagePtr& msg)
+        {
+            if(msg->type == ix::WebSocketMessageType::Open)
+            {
+                cout << "Websocket Connected Successfully" << endl;
+                has_last = false;
+                last_id = -1;
+            }
+            else if(msg->type == ix::WebSocketMessageType::Message)
+            {
+                try
+                {
+                    json j = json::parse(msg->str);
+
+                    if(j.contains("result") && j.contains("id"))
+                        return;
+
+                    if(j.contains("e") && j["e"] == "trade")
+                    {
+                        long long trade_id = j["t"].get<long long>();
+                        
+                        if(!has_last)
+                        {
+                            has_last = true;
+                            last_id = trade_id;
+                            return;
+                        }
+
+                        if(trade_id == last_id)
+                        {
+                            cout << "[DUPLICATE] " << trade_id << endl;
+                            return;
+                        }
+
+                        if(trade_id < last_id)
+                        {
+                            long long diff = last_id - trade_id;
+
+                            if(diff > OVERFLOW_LIMIT)
+                            {
+                                cout << "[OVERFLOW] reset detected. last="
+                                     << last_id << " new=" << trade_id << endl;
+
+                                last_id = trade_id;
+                            }
+                            else
+                            {
+                                cout << "[OUT_OF_ORDER] trade_id="
+                                     << trade_id << endl;
+                            }
+                            return;
+                        }
+
+                        
+                        if(trade_id > last_id + 1)
+                        {
+                            cout << "[LOSS] missing="
+                                 << (trade_id - last_id - 1) << endl;
+
+                            last_id = trade_id;
+                            return;
+                        }
+
+                        cout << "[NORMAL] " << trade_id << endl;
+                        last_id = trade_id;
+                    }
+                }
+                catch(const exception& e)
+                {
+                    cout << "Error: " << e.what() << endl;
+                }
+            }
+        }
+    );
+
+    ws.start();
+
+    while(true)
+        usleep(500);
+
+    ws.stop();
+    return 0;
+}
