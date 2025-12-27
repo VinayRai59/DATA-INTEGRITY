@@ -1,0 +1,124 @@
+#include <ixwebsocket/IXWebSocket.h>
+#include <iostream>
+#include <unistd.h>
+#include <string>
+#include <chrono>
+#include <nlohmann/json.hpp>
+
+using namespace std;
+using json = nlohmann::json;
+using namespace std::chrono;
+
+long long now_ms()
+{
+    return duration_cast<milliseconds>(
+        steady_clock::now().time_since_epoch()
+    ).count();
+}
+
+int main()
+{
+    ix::WebSocket ws;
+
+    bool ws_connected = false;
+    long long last_msg_time = 0;
+    const long long DISCONNECT_TIMEOUT_MS = 3000;
+
+    bool has_last = false;
+    long long last_id = -1;
+
+    ws.setUrl("wss://stream.binance.com:9443/ws/btcusdt@trade");
+
+    ws.setOnMessageCallback(
+        [&](const ix::WebSocketMessagePtr& msg)
+        {
+            if(msg->type == ix::WebSocketMessageType::Open)
+            {
+                cout << "[WS] Connected" << endl;
+                ws_connected = true;
+                last_msg_time = now_ms();
+
+                has_last = false;
+                last_id = -1;
+            }
+
+            else if(msg->type == ix::WebSocketMessageType::Message)
+            {
+                last_msg_time = now_ms();
+
+                try
+                {
+                    json j = json::parse(msg->str);
+
+                    if(j.contains("result") && j.contains("id"))
+                        return;
+
+                    if(j.contains("e") && j["e"] == "trade")
+                    {
+                        long long trade_id = j["t"].get<long long>();
+
+                        if(!has_last)
+                        {
+                            has_last = true;
+                            last_id = trade_id;
+                            return;
+                        }
+
+                        if(trade_id == last_id)
+                        {
+                            cout << "[DUPLICATE] trade_id=" << trade_id << endl;
+                            return;
+                        }
+
+                        if(trade_id > last_id + 1)
+                        {
+                            long long missing = trade_id - last_id - 1;
+
+                            cout << "[TICK_LOSS] missing="
+                                 << missing
+                                 << " last=" << last_id
+                                 << " new=" << trade_id
+                                 << endl;
+
+                            last_id = trade_id;
+                            return;
+                        }
+
+                        if(trade_id == last_id + 1)
+                        {
+                            cout << "[NORMAL] trade_id=" << trade_id << endl;
+                            last_id = trade_id;
+                        }
+                    }
+                }
+                catch(const exception& e)
+                {
+                    cout << "[ERROR] " << e.what() << endl;
+                }
+            }
+        }
+    );
+
+    ws.start();
+
+    while(true)
+    {
+        usleep(500 * 1000); 
+
+        if(ws_connected)
+        {
+            long long silence = now_ms() - last_msg_time;
+
+            if(silence > DISCONNECT_TIMEOUT_MS)
+            {
+                cout << "[NETWORK] Silent disconnect detected ("
+                     << silence << " ms no data)" << endl;
+
+                ws_connected = false;
+            }
+        }
+    }
+
+    ws.stop();
+    return 0;
+}
