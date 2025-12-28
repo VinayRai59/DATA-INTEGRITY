@@ -1,0 +1,221 @@
+#include <ixwebsocket/IXWebSocket.h>
+#include <iostream>
+#include <unistd.h>
+#include <string>
+#include <fstream>
+#include <csignal>
+#include <chrono>
+#include <nlohmann/json.hpp>
+
+using namespace std;
+using json = nlohmann::json;
+
+class tick_loss_stats{
+public:
+    long long total_ticks = 0;
+    long long total_loss_events = 0;
+    long long total_missing_ticks = 0;
+    long long max_missing_signal = 0;
+    long long low_count = 0;
+    long long medium_count = 0;
+    long long high_count = 0;
+
+    long long start_time_ms = 0;
+    long long end_time_ms   = 0;
+
+    static long long now_ms()
+    {
+        return chrono::duration_cast<chrono::milliseconds>(
+            chrono::system_clock::now().time_since_epoch()
+        ).count();
+    }
+
+    //constructor → program start time
+    tick_loss_stats()
+    {
+        start_time_ms = now_ms();
+        end_time_ms   = 0;
+    }
+
+    void reset()
+    {
+        total_ticks = 0;
+        total_loss_events = 0;
+        total_missing_ticks = 0;
+        max_missing_signal = 0;
+        low_count = medium_count = high_count = 0;
+    }
+
+    void finalize()
+    {
+        if(end_time_ms == 0)
+            end_time_ms = now_ms();
+    }
+
+    void record_loss(long long missing)
+    {
+        total_loss_events++;
+        total_missing_ticks += missing;
+
+        if(missing > max_missing_signal)
+            max_missing_signal = missing;
+
+        if(missing <= 2) low_count++;
+        else if(missing <= 20) medium_count++;
+        else high_count++;
+    }
+
+    void record_tick()
+    {
+        total_ticks++;
+    }
+
+    double avg_tps() const
+    {
+        if(end_time_ms <= start_time_ms)
+            return 0.0;
+
+        double seconds =
+            (end_time_ms - start_time_ms) / 1000.0;
+
+        return total_ticks / seconds;
+    }
+
+    string to_string() const
+    {
+        string s;
+        s += "============ Tick Loss Stats ============\n";
+        s += "Start time (ms)      : " + std::to_string(start_time_ms) + "\n";
+        s += "Close time (ms)      : " + std::to_string(end_time_ms) + "\n";
+        s += "Total ticks received : " + std::to_string(total_ticks) + "\n";
+        s += "Loss events          : " + std::to_string(total_loss_events) + "\n";
+        s += "Missing ticks total  : " + std::to_string(total_missing_ticks) + "\n";
+        s += "Max missing (signal) : " + std::to_string(max_missing_signal) + "\n";
+        s += "Low / Med / High     : "
+             + std::to_string(low_count) + " / "
+             + std::to_string(medium_count) + " / "
+             + std::to_string(high_count) + "\n";
+        s += "Average ticks/sec    : " + std::to_string(avg_tps()) + "\n";
+        s += "========================================\n\n";
+        return s;
+    }
+};
+
+void save_stats_to_file(const tick_loss_stats& stats)
+{
+    ofstream out("tick_loss_stats.log", ios::app);
+    if(out.is_open())
+    {
+        out << stats.to_string();
+        out.flush();
+        out.close();
+    }
+}
+
+tick_loss_stats* g_stats = nullptr;
+
+void handle_exit(int)
+{
+    cout << "\n[EXIT] Saving tick loss stats...\n";
+    if(g_stats)
+    {
+        g_stats->finalize();
+        save_stats_to_file(*g_stats);
+    }
+    _exit(0);
+}
+
+int main(){
+    ix::WebSocket ws;
+    tick_loss_stats stats;
+    g_stats = &stats;
+
+    signal(SIGINT,  handle_exit);
+    signal(SIGTERM, handle_exit);
+
+    bool has_last = false;
+    long long last_id = -1;
+
+    ws.setUrl("wss://stream.binance.com:9443/ws/btcusdt@trade");
+
+    ws.setOnMessageCallback(
+        [&](const ix::WebSocketMessagePtr& msg)
+        {
+            if(msg->type == ix::WebSocketMessageType::Open)
+            {
+                cout << "Websocket Connected Successfully\n";
+                has_last = false;
+                last_id  = -1;
+                stats.reset();
+            }
+
+            else if(msg->type == ix::WebSocketMessageType::Message)
+            {
+                try
+                {
+                    json j = json::parse(msg->str);
+
+                    if(j.contains("result") && j.contains("id"))
+                        return;
+
+                    if(j.contains("e") && j["e"] == "trade")
+                    {
+                        long long trade_id = j["t"].get<long long>();
+                        stats.record_tick();
+
+                        if(!has_last)
+                        {
+                            has_last = true;
+                            last_id  = trade_id;
+                            return;
+                        }
+
+                        if(trade_id == last_id)
+                            return;
+
+                        if(trade_id == last_id + 1)
+                        {
+                            last_id = trade_id;
+                            return;
+                        }
+
+                        if(trade_id > last_id + 1)
+                        {
+                            long long missing = trade_id - last_id - 1;
+                            stats.record_loss(missing);
+                            last_id = trade_id;
+                        }
+                    }
+                }
+                catch(const exception& e)
+                {
+                    cout << "Error : " << e.what() << endl;
+                }
+            }
+
+            else if(msg->type == ix::WebSocketMessageType::Error)
+            {
+                cout << "WebSocket Error : "<< msg->errorInfo.reason << endl;
+
+                stats.finalize();
+                save_stats_to_file(stats);
+            }
+
+            else if(msg->type == ix::WebSocketMessageType::Close)
+            {
+                cout << "WebSocket Closed : "<< msg->closeInfo.reason << endl;
+
+                stats.finalize();
+                save_stats_to_file(stats);
+            }
+        }
+    );
+
+    ws.start();
+
+    while(true)
+        usleep(500);
+
+    ws.stop();
+    return 0;
+}
